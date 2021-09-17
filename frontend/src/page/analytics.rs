@@ -17,7 +17,7 @@ use strecklistan_api::{
 #[derive(Clone, Debug)]
 pub enum AnalyticsMsg {
     ComputeCharts,
-    ChartsComputed(Rc<HashMap<InventoryItemId, Node<AnalyticsMsg>>>),
+    ChartsComputed((Rc<HashMap<InventoryItemId, Node<AnalyticsMsg>>>, Rc<Vec<(String,i32)>>)),
     SetStartDate(String),
     SetEndDate(String),
 
@@ -33,6 +33,8 @@ pub struct AnalyticsPage {
 
     /// Pre-computed and cached charts
     charts: Rc<HashMap<InventoryItemId, Node<AnalyticsMsg>>>,
+
+    top10: Rc<Vec<(String,i32)>>,
 
     /// Handle for the process computing the charts
     charts_job: Option<CmdHandle>,
@@ -62,6 +64,7 @@ impl AnalyticsPage {
         let now = Utc::now();
         AnalyticsPage {
             charts: Rc::new(HashMap::new()),
+            top10: Rc::new(Vec::new()),
             charts_job: None,
             start_date: now - Duration::days(365),
             end_date: now,
@@ -82,8 +85,9 @@ impl AnalyticsPage {
             AnalyticsMsg::ComputeCharts => {
                 self.compute_charts(&res, &mut orders_local);
             }
-            AnalyticsMsg::ChartsComputed(charts) => {
+            AnalyticsMsg::ChartsComputed((charts,top10)) => {
                 self.charts = charts;
+                self.top10 = top10;
                 self.charts_job = None;
             }
             AnalyticsMsg::SetStartDate(input) => {
@@ -154,6 +158,7 @@ impl AnalyticsPage {
                     ]
                 },
             ],
+            div![self.top10.iter().map(|(n,t)| div![p![n],p![t]])],
             div![self.charts.values().map(|chart| chart.clone())],
         ]
         .map_msg(|msg| Msg::AnalyticsMsg(msg))
@@ -168,10 +173,35 @@ impl AnalyticsPage {
 
         let inventory_by_week = calculate_inventory_by_week(&res.transactions);
         let inventory = res.inventory.clone();
+        let transactions = res.transactions.clone();
         let start_date = self.start_date;
         let end_date = self.end_date;
 
         self.charts_job = Some(orders.perform_cmd_with_handle(async move {
+            // Create Top 10
+
+            let mut counter : HashMap<i32,i32> = HashMap::new();
+            for transaction in transactions {
+                if &transaction.time > &start_date && &transaction.time < &end_date {
+                    for item in transaction.bundles {
+                        if item.change < 0 {
+                            let item_id = *(item.item_ids.keys().next().unwrap_or(&0));
+                            counter.insert(item_id, counter.get(&item_id).unwrap_or(&0) + -1 * (item.change));
+                        }
+                    }
+                }
+            }
+
+            let mut top10 : Vec<(String,i32)> = Vec::new();
+
+            for (k,v) in counter {
+                let name = inventory.get(&k).map(|i| i.name.clone()).unwrap_or(String::new());
+                top10.push((name,v));
+            }
+            top10.sort_by(|a,b| (*b).1.cmp(&a.1));
+            top10.resize(if top10.len() < 10 {top10.len()} else {10},(String::new(),0));
+
+            // Create Weekly overview
             let mut charts = HashMap::new();
             for (id, item) in inventory {
                 let chart =
@@ -181,7 +211,7 @@ impl AnalyticsPage {
 
                 timeout(10, || ()).await
             }
-            AnalyticsMsg::ChartsComputed(Rc::new(charts))
+            AnalyticsMsg::ChartsComputed((Rc::new(charts), Rc::new(top10)))
         }));
     }
 }
